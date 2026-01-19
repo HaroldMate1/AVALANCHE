@@ -98,6 +98,30 @@ Providing a seed DOI identifies a starting node. Avalanche then traverses connec
 1. **Clone the repository**
    ```bash
    git clone https://github.com/HaroldMate1/avalanche.git
+   cd avalanche
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure API keys** (recommended for best performance)
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your email/API keys
+   ```
+
+   At minimum, add your email for faster OpenAlex access:
+   ```
+   OPENALEX_EMAIL=your.email@university.edu
+   ```
+
+   Optional but recommended for 10x speed:
+   - Get Semantic Scholar API key: https://www.semanticscholar.org/product/api
+   - Get CORE API key: https://core.ac.uk/services/api
+
+---
 
 ## 📖 Usage
 
@@ -105,3 +129,40 @@ Run the script providing the DOI of your "Seed Paper":
 
 ```bash
 python avalanche.py 10.1038/s41586-020-2649-2
+```
+
+You'll be prompted for:
+- **Keywords**: Terms to search for (e.g., "machine learning, transformers")
+- **Exclude terms**: Terms to filter out (e.g., "survey, review")
+- **Depth**: How many levels deep to follow citations (1-6, default: 2)
+- **Mode**:
+  - Mode 1: Classical Snowball (citation graph only)
+  - Mode 2: Dual Process (graph + keyword search across databases)
+
+---
+
+## 🔧 Recent Updates (v1.1 - 2026-01-19)
+
+### Critical Bug Fixes
+- ✅ Fixed duplicate code execution bug that caused double processing
+- ✅ Added thread-safe operations to prevent race conditions
+- ✅ Added DOI validation with clear error messages
+- ✅ Improved error logging (no more silent failures)
+- ✅ Added API configuration checker at startup
+
+### Improvements
+- Better user feedback during execution
+- Clearer warnings for missing API keys
+- Enhanced error handling throughout
+- Added `.env.example` template for easy setup
+
+---
+
+## 📝 Citation
+
+If you use AVALANCHE in your research, please cite:
+
+```
+AVALANCHE: Automated Federated Literature Discovery Tool
+Harold Mateo Mojica Urrego, University of Navarra-TECNUN, 2026
+GitHub: https://github.com/HaroldMate1/AVALANCHE
