@@ -105,6 +105,27 @@ def normalize_doi(doi: str) -> str:
 def fuzzy_match(s1: str, s2: str) -> float:
     return SequenceMatcher(None, s1, s2).ratio()
 
+def validate_doi(doi: str) -> bool:
+    """
+    Validates DOI format. A valid DOI contains:
+    - Prefix: 10.XXXX (where XXXX is 4+ digits)
+    - Suffix: Any characters after /
+    Examples: 10.1038/nature12373, 10.1109/5.771073
+    """
+    if not doi:
+        return False
+
+    # Remove common prefixes if present
+    clean_doi = doi.lower()
+    clean_doi = clean_doi.replace("https://doi.org/", "")
+    clean_doi = clean_doi.replace("http://doi.org/", "")
+    clean_doi = clean_doi.replace("doi:", "")
+    clean_doi = clean_doi.strip()
+
+    # Basic DOI pattern: 10.XXXX/suffix
+    doi_pattern = r"^10\.\d{4,}/\S+"
+    return bool(re.match(doi_pattern, clean_doi))
+
 # ----------------------------
 # Smart Scoring & Exclusion
 # ----------------------------
@@ -284,11 +305,12 @@ def core_search(query: str, kw, ex) -> List[dict]:
             for item in data.get("results", []):
                 results.append(make_record(
                     "CORE", item.get("title"), item.get("yearPublished"), item.get("doi"),
-                    0, item.get("abstract"), "", 
+                    0, item.get("abstract"), "",
                     item.get("downloadUrl"), "Topic Search", kw, ex
                 ))
             return [r for r in results if r]
-    except: pass
+    except Exception as e:
+        safe_print(f"  [⚠️ CORE] Request failed: {e}")
     return []
 
 # 4. PubMed (Fixed)
@@ -339,7 +361,8 @@ def arxiv_search(query: str, kw, ex) -> List[dict]:
                 0, entry.findtext("a:summary", "", ns), "ArXiv",
                 entry.findtext("a:id", "", ns), "Topic Search", kw, ex
             ))
-    except: pass
+    except Exception as e:
+        safe_print(f"  [⚠️ ArXiv] XML parsing failed: {e}")
     return [r for r in results if r]
 
 # 6. OpenAlex Helper (Invert Index)
@@ -448,7 +471,8 @@ def fetch_oa_chunk_recursive(work_ids: List[str], depth_level: int, kw: List[str
                 rec["_depth"] = depth_level
                 rec["_refs"] = w.get("referenced_works", []) or []
                 out.append(rec)
-        except Exception:
+        except Exception as e:
+            safe_print(f"  [⚠️ OpenAlex] Failed to process work: {e}")
             continue
 
     return out
@@ -488,7 +512,34 @@ def openalex_fetch_citations(seed_openalex_id: str, kw: List[str], ex: List[str]
 # ----------------------------
 def main(seed_doi: str):
     print(f"--- AVALANCHE | DOI: {seed_doi} ---")
-    
+
+    # Validate DOI format
+    if not validate_doi(seed_doi):
+        print(f"\n[ERROR] Invalid DOI format: '{seed_doi}'")
+        print("Expected format: 10.XXXX/suffix (e.g., 10.1038/s41586-020-2649-2)")
+        print("You can also use full URL: https://doi.org/10.XXXX/suffix")
+        sys.exit(1)
+
+    # Check API key configuration
+    print("\n--- API Configuration ---")
+    if API_KEYS["OPENALEX_EMAIL"] == "example@example.com":
+        print("  [⚠️] OpenAlex: Using default email (slow rate limits)")
+        print("      → Add OPENALEX_EMAIL to .env for faster access")
+    else:
+        print(f"  [✓] OpenAlex: {API_KEYS['OPENALEX_EMAIL']}")
+
+    if API_KEYS["S2_API_KEY"]:
+        print("  [✓] Semantic Scholar: API key configured")
+    else:
+        print("  [⚠️] Semantic Scholar: No API key (1 req/sec limit)")
+        print("      → Add S2_API_KEY to .env for 10x speed boost")
+
+    if API_KEYS["CORE_API_KEY"]:
+        print("  [✓] CORE: API key configured")
+    else:
+        print("  [⚠️] CORE: No API key (CORE search disabled)")
+
+    print()
     kw_input = input(" > Keywords (comma sep): ").strip()
     keywords = [k.strip() for k in kw_input.split(",") if k.strip()]
     
@@ -512,13 +563,15 @@ def main(seed_doi: str):
 
     # --- Phase 1: Federated Graph Search (Recursive) ---
     print("\n--- Phase 1: Federated Graph Search ---")
-    
+
     # Check OpenAlex for Seed using robust lookup
     seed_data = openalex_get_work_by_doi(seed_doi)
     
     all_records = []
     seen_ids: Set[str] = set()     # OpenAlex work IDs seen (cycle prevention)
     seen_dois: Set[str] = set()    # For dedup later
+    seen_ids_lock = Lock()         # Thread-safe access to seen_ids
+    records_lock = Lock()          # Thread-safe access to all_records
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures: Set[concurrent.futures.Future] = set()
@@ -542,16 +595,18 @@ def main(seed_doi: str):
 
             if seed_rec:
                 print(f"   [Seed Found] {seed_rec['Title'][:60]}...")
-                all_records.append(seed_rec)
-                seen_ids.add(seed_data["id"])
-                if seed_rec["DOI"]:
-                    seen_dois.add(seed_rec["DOI"])
+                with records_lock:
+                    all_records.append(seed_rec)
+                with seen_ids_lock:
+                    seen_ids.add(seed_data["id"])
+                    if seed_rec["DOI"]:
+                        seen_dois.add(seed_rec["DOI"])
 
-                # 1) Seed references (backward)
-                refs = seed_data.get("referenced_works", []) or []
-                # mark as seen immediately (avoids duplicate queueing)
-                new_refs = [r for r in refs if r not in seen_ids]
-                seen_ids.update(new_refs)
+                    # 1) Seed references (backward)
+                    refs = seed_data.get("referenced_works", []) or []
+                    # mark as seen immediately (avoids duplicate queueing)
+                    new_refs = [r for r in refs if r not in seen_ids]
+                    seen_ids.update(new_refs)
 
                 for batch in chunked(new_refs, 50):
                     futures.add(executor.submit(fetch_oa_chunk_recursive, batch, 1, keywords, excluded))
@@ -587,15 +642,17 @@ def main(seed_doi: str):
                         if "_depth" in rec: rec.pop("_depth", None)
                         if "_refs" in rec: rec.pop("_refs", None)
 
-                        all_records.append(rec)
-                        if rec.get("DOI"):
-                            seen_dois.add(rec["DOI"])
+                        with records_lock:
+                            all_records.append(rec)
+                            if rec.get("DOI"):
+                                seen_dois.add(rec["DOI"])
 
                         # Recurse if applicable
                         if rec_depth is not None and rec_refs is not None and rec_depth < depth:
                             next_depth = rec_depth + 1
-                            unseen_refs = [r for r in rec_refs if r not in seen_ids]
-                            seen_ids.update(unseen_refs)
+                            with seen_ids_lock:
+                                unseen_refs = [r for r in rec_refs if r not in seen_ids]
+                                seen_ids.update(unseen_refs)
 
                             for batch in chunked(unseen_refs, 50):
                                 safe_print(f"   [+] Snowballing: {len(batch)} refs from '{rec['Title'][:20]}...' (Depth {next_depth})")
@@ -622,84 +679,12 @@ def main(seed_doi: str):
                     try:
                         res = f.result()
                         if isinstance(res, list):
-                            for r in res:
-                                if r:
-                                    all_records.append(r)
+                            with records_lock:
+                                for r in res:
+                                    if r:
+                                        all_records.append(r)
                     except Exception as e:
                         safe_print(f"Error: {e}")
-        else:
-            print("\n--- Phase 2: Skipped (Classical Snowball selected) ---")
-
-        # B. Recursive Loop
-        # We keep processing as long as there are active tasks
-        while futures:
-            # Wait for the first batch of threads to finish
-            done, futures = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
-            
-            for f in done:
-                try:
-                    new_records = f.result() # This is the list from fetch_oa_chunk_recursive
-                    
-                    for rec in new_records:
-                        # 1. Save valid record
-                        # (Clean up hidden fields before export if you want, or just leave them)
-                        rec_depth = rec.get("_depth", 1)
-                        rec_refs = rec.get("_refs", [])
-                        
-                        # Add to final list
-                        all_records.append(rec)
-                        
-                        # 2. RECURSION CHECK
-                        # If we haven't hit max depth, queue this paper's references
-                        if rec_depth < depth:
-                            next_depth = rec_depth + 1
-                            
-                            # Filter: Only follow refs we haven't seen yet
-                            unseen_refs = [r for r in rec_refs if r not in seen_ids]
-                            
-                            # Mark as seen immediately so other threads don't queue them
-                            seen_ids.update(unseen_refs)
-                            
-                            if unseen_refs:
-                                # Chunk and Submit
-                                for i in range(0, len(unseen_refs), 50):
-                                    batch = unseen_refs[i:i+50]
-                                    safe_print(f"   [+] Snowballing: {len(batch)} refs from '{rec['Title'][:20]}...' (Depth {next_depth})")
-                                    futures.add(executor.submit(fetch_oa_chunk_recursive, batch, next_depth, keywords, excluded))
-                                    
-                except Exception as e:
-                    safe_print(f"   [Error] Worker failed: {e}")
-
-        # Clean up hidden fields before deduplication
-        for r in all_records:
-            r.pop("_refs", None)
-            r.pop("_depth", None)
-        
-        print(f"   [Graph Phase Complete] Found {len(all_records)} raw records.")
-        
-        # B. Process Topic Search (Parallel)
-        # ONLY IF DUAL PROCESS IS SELECTED
-        if search_mode == 2:
-            print("\n--- Phase 2: Multi-Source Topic Search ---")
-            if keywords:
-                query = " ".join(keywords[:3])
-                topic_futures: Set[concurrent.futures.Future] = set()
-                topic_futures.add(executor.submit(s2_search, query, keywords, excluded))
-                topic_futures.add(executor.submit(crossref_search, query, keywords, excluded))
-                topic_futures.add(executor.submit(pubmed_search, query, keywords, excluded))
-                topic_futures.add(executor.submit(arxiv_search, query, keywords, excluded))
-                if API_KEYS["CORE_API_KEY"]:
-                    topic_futures.add(executor.submit(core_search, query, keywords, excluded))
-                
-                print("   ... Waiting for topic search workers ...")
-                for f in concurrent.futures.as_completed(topic_futures):
-                    try:
-                        res = f.result()
-                        if isinstance(res, list):
-                            for r in res:
-                                all_records.append(r)
-                    except Exception as e:
-                        safe_print(f"   [Error] Topic search failed: {e}")
         else:
             print("\n--- Phase 2: Skipped (Classical Snowball selected) ---")
     print(f"\n--- Phase 3: Fuzzy Deduplication (Raw: {len(all_records)}) ---")
