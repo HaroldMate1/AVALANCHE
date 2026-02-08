@@ -128,7 +128,7 @@ Providing a seed DOI identifies a starting node. Avalanche then traverses connec
 Run the script providing the DOI of your "Seed Paper":
 
 ```bash
-python avalanche.py 10.1038/s41586-020-2649-2
+python avalanche.py 10.1016/j.addr.2017.09.009
 ```
 
 You'll be prompted for:
